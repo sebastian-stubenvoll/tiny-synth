@@ -1,6 +1,3 @@
-//! Blinks the LED on a Pico board
-//!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
 #![no_std]
 #![no_main]
 
@@ -10,42 +7,80 @@ use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
 use panic_probe as _;
 
-// Provide an alias for our BSP so we can switch targets quickly.
-// Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
-use rp_pico as bsp;
-// use sparkfun_pro_micro_rp2040 as bsp;
+
+//BSP alias
+use pimoroni_tiny2040 as bsp;
 
 use bsp::hal::{
-    clocks::{init_clocks_and_plls, Clock},
+    clocks::{Clock, ClockSource, ClocksManager},
     pac,
+    pll::{common_configs::PLL_USB_48MHZ, setup_pll_blocking, PLLConfig},
     sio::Sio,
-    watchdog::Watchdog,
+    xosc::setup_xosc_blocking
 };
+
+use fugit::{Rate, RateExtU32};
+
+const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+
+
+
 
 #[entry]
 fn main() -> ! {
-    info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
     let sio = Sio::new(pac.SIO);
 
-    // External high-speed crystal on the pico board is 12Mhz
-    let external_xtal_freq_hz = 12_000_000u32;
-    let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
-        pac.XOSC,
-        pac.CLOCKS,
+    // Set up overclocking
+
+    let mut clocks = ClocksManager::new(pac.CLOCKS);
+    let xosc = setup_xosc_blocking(pac.XOSC, XTAL_FREQ_HZ.Hz())
+        .ok()
+        .unwrap();
+
+    // Init custom PLL_SYS struct
+    // Clock will run at vco_freq / ( refdiv * post_div1 * post_div2 )
+    // i.e. 1500e+6 / (1 * 3 * 2) = 250e+6
+    let pll_sys_freq: PLLConfig = PLLConfig {
+        vco_freq: 1500.MHz(),
+        refdiv: 1,
+        post_div1: 3,
+        post_div2: 2,
+    };
+
+    // Setup the PLLs
+    let pll_sys = setup_pll_blocking(
         pac.PLL_SYS,
-        pac.PLL_USB,
+        xosc.operating_frequency().into(),
+        pll_sys_freq,
+        &mut clocks,
         &mut pac.RESETS,
-        &mut watchdog,
     )
-    .ok()
-    .unwrap();
+        .ok()
+        .unwrap();
+
+    let pll_usb = setup_pll_blocking(
+        pac.PLL_USB,
+        xosc.operating_frequency().into(),
+        PLL_USB_48MHZ,
+        &mut clocks,
+        &mut pac.RESETS,
+    )
+        .ok()
+        .unwrap();
+
+    // Start clocks
+    clocks.reference_clock.configure_clock(&xosc, xosc.get_freq()).ok();
+    clocks.system_clock.configure_clock(&pll_sys, pll_sys.get_freq()).ok();
+    clocks.usb_clock.configure_clock(&pll_usb, pll_usb.get_freq()).ok();
+    clocks.adc_clock.configure_clock(&pll_usb, pll_usb.get_freq()).ok();
+    clocks.rtc_clock.configure_clock(&pll_usb, 46875u32.Hz()).ok();
+    clocks.peripheral_clock.configure_clock(&clocks.system_clock, clocks.system_clock.freq()).ok();
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
+    // Set the pins to their default state
     let pins = bsp::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
@@ -53,20 +88,19 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    // This is the correct pin on the Raspberry Pico board. On other boards, even if they have an
-    // on-board LED, it might need to be changed.
-    // Notably, on the Pico W, the LED is not connected to any of the RP2040 GPIOs but to the cyw43 module instead. If you have
-    // a Pico W and want to toggle a LED with a simple GPIO output pin, you can connect an external
-    // LED to one of the GPIO pins, and reference that pin here.
-    let mut led_pin = pins.led.into_push_pull_output();
+    let mut led_green = pins.led_green.into_push_pull_output();
+    let mut led_red = pins.led_red.into_push_pull_output();
+    let mut led_blue = pins.led_blue.into_push_pull_output();
+    led_green.set_high().unwrap();
+    led_red.set_high().unwrap();
+    led_blue.set_high().unwrap();
+
 
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        led_green.set_low().unwrap();
+        delay.delay_ms(100);
+        led_green.set_high().unwrap();
+        delay.delay_ms(400);
     }
 }
 
